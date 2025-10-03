@@ -1,4 +1,4 @@
-name: Workflow
+name: qswat-qli-workflow
 on:
   pull_request:
     types: [opened, synchronize]
@@ -35,7 +35,6 @@ jobs:
         env:
           AWS_PASSWORD: ${{ secrets.QSWATQACLOUDSVC }}
         run: |
-          run: |
           export PATH=$PATH:~/.local/bin
           awslogin direct \
             --username qswatqacloudsvc \
