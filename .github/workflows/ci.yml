@@ -1,0 +1,112 @@
+name: qswat-qli-workflow
+on:
+  pull_request:
+    types: [opened, synchronize]
+  push:
+    branches:
+      - main
+  workflow_dispatch: # New event trigger for manual runs
+
+jobs:
+  job6:
+    name: Upload to S3
+    runs-on: [self-hosted, qli-ubuntu-lv4-r2]
+    steps:
+      - name: Print the run ID
+        run: echo "The run ID is ${{ github.run_id }}"
+      - name: Print the run attempt
+        run: echo "The run ID is ${{ github.run_attempt }}"
+      - name: Print host name
+        run: hostname
+      
+      - name: Check AWS credentials
+        id: check_creds
+        run: |
+          if aws --profile arn:aws:iam::533423057806:role/SmlAppPU sts get-caller-identity > /dev/null 2>&1; then
+            echo "AWS credentials are valid."
+            echo "valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "AWS credentials are invalid."
+            echo "valid=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Run awslogin if credentials are invalid
+        if: steps.check_creds.outputs.valid == 'false'
+        env:
+          AWS_PASSWORD: ${{ secrets.QSWATQACLOUDSVC }}
+        run: |
+          export PATH=$PATH:~/.local/bin
+          awslogin direct \
+            --username qswatqacloudsvc \
+            --password "$AWS_PASSWORD" \
+            --account 533423057806 \
+            --role SmlAppPU
+          aws --profile arn:aws:iam::533423057806:role/SmlAppPU s3 ls
+      
+      - name: Create and compress file
+        run: |
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          
+          DIR_NAME="TestPilot_bootbinaries"
+          mkdir -p "$DIR_NAME"
+          cp /local/mnt/workspace/githubactionrunner/contents.xml ./"$DIR_NAME"/
+          FILENAME="dynamic_file_${TIMESTAMP}.txt"
+          echo "This is a dynamically generated file." > "$DIR_NAME/$FILENAME"
+          ARCHIVE_NAME="TestPilot_bootbinaries.tar.gz"
+          tar -czvf "$ARCHIVE_NAME" "$DIR_NAME"
+          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+          echo "DIR_NAME=$DIR_NAME" >> $GITHUB_ENV
+
+      
+      - name: Upload to S3
+        run: |
+          aws --profile arn:aws:iam::533423057806:role/SmlAppPU s3 cp ${{ env.ARCHIVE_NAME }} s3://qli-stg-kernel-gh-artifacts/qualcomm-linux-stg/qli-validations-qa4/${{ github.run_id }}-${{ github.run_attempt }}/flatbuild/bootbinaries/
+          rm -r "${{ env.DIR_NAME }}"
+          rm "${{ env.ARCHIVE_NAME }}"
+      
+  job1:
+    name: Checkout and Curl
+    needs: job6
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print the run ID
+        run: echo "The run ID is ${{ github.run_id }}"
+      - name: Make GET request to Github API
+        run: curl -X GET https://api.github.com
+      - name: Print Response
+        run: echo "GET Request Completed"
+
+
+  job2:
+    name: Post check run
+    needs: job6
+    runs-on: ubuntu-latest
+    steps:
+      - name: Make GET request to Github API
+        run: curl -X GET https://api.github.com
+      - name: Print Response
+        run: echo "GET Request Completed"
+      - name: Create Check Run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            HEAD_SHA="${{ github.sha }}"
+          fi
+          s3_location="${{ github.repository_owner }}/${{ github.event.repository.name }}/${{ github.run_id }}-${{ github.run_attempt }}/flatbuild/bootbinaries/"
+          CHECK_RUN_ID=$(curl -L -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          https://api.github.com/repos/${{ github.repository }}/check-runs \
+          -d '{"name":"My Check","head_sha":"'"$HEAD_SHA"'","status":"in_progress","output":{"title":"Check S3 Location","summary":"","text":"'"$s3_location"'"}}' | jq -r '.id')
+
+          curl -L -X PATCH \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          https://api.github.com/repos/${{ github.repository }}/check-runs/$CHECK_RUN_ID \
+          -d '{"name":"My Check","head_sha":"'"$HEAD_SHA"'","status":"completed","conclusion":"success","output":{"title":"Check S3 Location","summary":"","text":"'"$s3_location"'"}}'
